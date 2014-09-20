@@ -1,0 +1,7 @@
+    parameters:
+      ssh_key_name: <your ssh key registered with nova keypair-add>
+      external_network_id: <your public network ID here>
+      server_image: f20
+      dns_nameserver: 8.8.8.8
+
+
