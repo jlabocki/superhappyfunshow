@@ -17,5 +17,5 @@ Please see the kubedeploy directory README.md for further information.
 
 Directories
 =================
-docker     - contains artifacts for use with docker build to build appropriate images
-kubedeploy - contains a Heat template to deploy a kubernetes cluster (see README.md)
+* docker     - contains artifacts for use with docker build to build appropriate images
+* kubedeploy - contains a Heat template to deploy a kubernetes cluster (see README.md)
