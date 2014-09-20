@@ -1,0 +1,209 @@
+heat_template_version: 2013-05-23
+
+description: >
+  This is a nested stack that defines a single Kubernetes minion,
+  based on a vanilla Fedora 20 cloud image.  This stack is included by
+  a ResourceGroup resource in the parent template (kubecluster.yaml).
+
+parameters:
+
+  server_image:
+    type: string
+    default: fedora-20-x86_64-updated
+    description: glance image used to boot the server
+
+  server_flavor:
+    type: string
+    default: m1.small
+    description: flavor to use when booting the server
+
+  ssh_key_name:
+    type: string
+    description: name of ssh key to be provisioned on our server
+    default: lars
+
+  external_network_id:
+    type: string
+    description: uuid of a network to use for floating ip addresses
+
+  bridge_address_base:
+    type: string
+    description: >
+      first two octets of a /16 network to use for minion
+      addresses.
+    default: 10.251
+
+  # The following are all generated in the parent template.
+  kube_master_ip:
+    type: string
+    description: IP address of the Kubernetes master server.
+  fixed_network_id:
+    type: string
+    description: Network from which to allocate fixed addresses.
+  fixed_subnet_id:
+    type: string
+    description: Subnet from which to allocate fixed addresses.
+
+resources:
+
+  linkmanager_key:
+    type: "OS::Heat::RandomString"
+
+  # I am lazy, so this opens up all ports.
+  secgroup_all_open:
+    type: "OS::Neutron::SecurityGroup"
+    properties:
+      rules:
+        - protocol: icmp
+        - protocol: tcp
+        - protocol: udp
+
+  kube_node:
+    type: "OS::Nova::Server"
+    properties:
+      image:
+        get_param: server_image
+      flavor:
+        get_param: server_flavor
+      key_name:
+        get_param: ssh_key_name
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/sh
+
+            bridge_address_base="$BRIDGE_ADDRESS_BASE"
+
+            yum -y remove NetworkManager
+            chkconfig network on
+
+            yum -y upgrade
+            yum -y install jq dnf dnf-plugins-core \
+              openvswitch bridge-utils docker-io \
+              git python-netifaces python-requests \
+              tcpdump python-netifaces python-setuptools
+
+            # enable kubernetes repository
+            dnf -y copr enable walters/atomic-next
+            sed -i 's/$releasever/21/g' /etc/yum.repos.d/_copr_walters-atomic-next.repo
+            yum -y install kubernetes
+
+            myip=$(ip addr show eth0 | awk '$1 == "inet" {print $2}' | cut -f1 -d/)
+            myip_last_octet=${myip##*.}
+            bridge_address="${bridge_address_base}.${myip_last_octet}.1"
+            netconf=/etc/sysconfig/network-scripts
+
+            # Docker contains are attached to this bridge
+            cat > $netconf/ifcfg-kbr0 <<EOF
+            DEVICE=kbr0
+            TYPE=Bridge
+            IPADDR=${bridge_address}
+            NETMASK=255.255.255.0
+            ONBOOT=yes
+            STP=yes
+
+            # With the default forwarding delay of 15 seconds,
+            # many operations in a 'docker build' will simply timeout
+            # before the bridge starts forwarding.
+            DELAY=2
+            EOF
+
+            # This bridge will handle VXLAN tunnels
+            cat > $netconf/ifcfg-obr0 <<EOF
+            DEVICE=obr0
+            DEVICETYPE=ovs
+            TYPE=OVSBridge
+            ONBOOT=yes
+            BRIDGE=kbr0
+            STP=true
+            EOF
+
+            cat > $netconf/route-kbr0 <<EOF
+            ${bridge_address_base}.0.0/16 dev kbr0 scope link src ${bridge_address}
+            EOF
+
+            # Container interface MTU must be reduced in order to
+            # prevent fragmentation problems when vxlan header is
+            # added to a host-MTU sized packet.
+            cat > /etc/sysconfig/docker <<EOF
+            OPTIONS="--selinux-enabled -b kbr0 --mtu 1450"
+            EOF
+
+            sed -i '/^KUBE_ETCD_SERVERS=/ s|=.*|=http://$KUBE_MASTER_IP:4001|' /etc/kubernetes/config
+            sed -i '
+              /^MINION_ADDRESS=/ s/=.*/="0.0.0.0"/
+              /^MINION_HOSTNAME=/ s/=.*/="'"$myip"'"/
+            ' /etc/kubernetes/kubelet
+
+            sed -i '
+              /^KUBE_API_ADDRESS=/ s/=.*/="$KUBE_MASTER_IP"/
+              /^KUBE_MASTER=/ s/=.*/="$KUBE_MASTER_IP"/
+            ' /etc/kubernetes/apiserver
+
+            # install linkmanager for managing OVS links
+            # for minion overlay network.
+            git clone http://github.com/larsks/linkmanager.git \
+              /opt/linkmanager
+            (
+              cd /opt/linkmanager
+              python setup.py install
+              cp linkmanager.service /etc/systemd/system/linkmanager.service
+            )
+            cat > /etc/sysconfig/linkmanager <<EOF
+            OPTIONS="-s http://$KUBE_MASTER_IP:4001 -v -b obr0 --secret $LINKMANAGER_KEY"
+            EOF
+
+            cat >> /etc/environment <<EOF
+            KUBERNETES_MASTER=http://$KUBE_MASTER_IP:8080
+            EOF
+
+            # start bridges first
+            systemctl enable openvswitch
+            systemctl start openvswitch
+            ifup kbr0
+            ifup obr0
+
+            # then other services
+            for service in docker.socket kubelet kube-proxy linkmanager; do
+              systemctl enable $service
+              systemctl start $service
+            done
+          params:
+            "$KUBE_MASTER_IP":
+              get_param: kube_master_ip
+            "$BRIDGE_ADDRESS_BASE":
+              get_param: bridge_address_base
+            "$LINKMANAGER_KEY":
+              get_attr: [linkmanager_key, value]
+      networks:
+        - port:
+            get_resource: kube_node_eth0
+
+  kube_node_eth0:
+    type: "OS::Neutron::Port"
+    properties:
+      network_id:
+        get_param: fixed_network_id
+      security_groups:
+        - get_resource: secgroup_all_open
+      fixed_ips:
+        - subnet_id:
+            get_param: fixed_subnet_id
+
+  kube_node_floating:
+    type: "OS::Neutron::FloatingIP"
+    properties:
+      floating_network_id:
+        get_param: external_network_id
+      port_id:
+        get_resource: kube_node_eth0
+
+outputs:
+
+  kube_node_ip:
+    value: {get_attr: [kube_node_eth0, fixed_ips, 0, ip_address]}
+  
+  kube_node_external_ip:
+    value: {get_attr: [kube_node_floating, floating_ip_address]}
+
