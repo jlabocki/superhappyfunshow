@@ -14,3 +14,8 @@ environment.  As a result, we have created a Heat based deployment environment.
 Our template requires Neutron to operate.
 
 Please see the kubedeploy directory README.md for further information.
+
+Directories
+=================
+docker     - contains artifacts for use with docker build to build appropriate images
+kubedeploy - contains a Heat template to deploy a kubernetes cluster (see README.md)
