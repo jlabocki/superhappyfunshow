@@ -1,13 +1,16 @@
 superhappyfunshow
 =================
 
-A concept for how to deploy the OpenStack Services within Docker containers using Kubernetes on Project Atomic.
+A proof of concept for how to deploy the OpenStack Services within Docker
+containers using Kubernetes on Project Atomic.
 
 
 Getting Started
 =================
 
-We need to write a quick how to here on how to get an environment set up.
+Kubernetes deployment on bare metal is a complex topic which is beyond the
+scope of this project at this time.  The developers still require a test
+environment.  As a result, we have created a Heat based deployment environment.
+Our template requires Neutron to operate.
 
-1. Download and Deploy RHEL Atomic - http://www.projectatomic.io/download/
-2. Deploy a pod with kubernetes
+Please see the kubedeploy directory README.md for further information.
